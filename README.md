@@ -1,7 +1,15 @@
-# A Comprehensive Guide to Strapi
+&nbsp;    
 
+<img width="100" align="left" alt="Strapi monogram logo" src="https://github.com/NewcastleRSE/tools_and_practices/assets/52718007/3b7c715c-e61c-4f1b-beee-f34f3b3b91d4">
+
+# A Comprehensive Guide to Strapi
+### Created by [Imre Draskovits](https://github.com/notimre) - Summer 2023
+
+&nbsp;   
+   
 TODO: Add table of contents    
 TODO: Add best design practices when creating collection types
+
 
 ## Getting Started
 
@@ -177,7 +185,37 @@ You need to modify 5 lines across two files in `.github/workflows/`, indicated w
        - `Password`
 
        **Make sure you name everything exactly the same as above**
-       
+
+## Example of GitHub Action for other cloud providers
+To adapt the above approach for Oracle, you may need to ssh into the VM and run git and docker commands, for example from the OrQA project:
+```
+name: staging
+
+on:
+  push:
+    branches: 
+      - dev
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: SSH Remote Commands
+      uses: appleboy/ssh-action@v0.1.10
+      with:
+        host: ${{ secrets.STAGING_HOST }}
+        username: ${{ secrets.STAGING_USERNAME }}
+        key: ${{ secrets.STAGING_KEY }}
+        script: |
+          docker compose stop strapi
+          docker compose rm orqa-container 
+          cd orqa-strapi
+          git pull
+          cd ..
+          docker compose build --no-cache strapi
+          docker compose up -d strapi
+```
+
 ## Create a new version release
 
 The deployment is done by [Terraform](https://www.terraform.io/).  
@@ -213,6 +251,48 @@ Not setting up this will result in the container registry restarting, resulting 
 
 This in theory should mount your App Container to your Storage Account, therefore not 'losing' any media when the server restarts.
 
+## Other cloud providers
+In the case of Oracle, you need to deploy Strapi to a VM. Oracle calls these 'Compute Instances'
+
+Make sure you have VCN set up in advance, which will contain the Strapi Compute Instance, the database and the frontend e.g. a Container Instance.
+
+1. Create a compute instance on the Oracle Cloud, ensuring it is inside the correct compartment, and in the public subnet of the VCN. Generate or add an ssh key as part of the creation.
+
+2. Once created, select 'Quick Actions' from the left hand menu under the Resources title, and set up the instance to access the internet.
+
+3. Add the ssh key to your local .ssh folder
+
+4. Log into the instance from your local command line with `ssh -i
+.ssh/ssh-key.key opc@<instance_IP>`
+(NB, if having issues, check the ssh key has the right permission settings with `chmod 400 ssh-key.key`
+
+5. Once inside the instance, install git, yarn, node, docker and nvm (using yum,
+assuming using an oracle linux base which is closest to CentOS).
+
+6. Pull the strapi repo to the instance. You may need to update the environment variables in the Dockerfile using, e.g. nano.
+
+7. Build the docker container inside the repository directory using `sudo docker build -t orqa-strapi .`
+
+8. Once built, run the docker container using `sudo docker run -p 1337:1337 --detach --name orqa-container orqa-strapi`
+
+9. Check everything is working as intended by viewing the logs. First check the
+instance ID with `sudo docker ps` then use the ID that shows up for the running
+container to access the logs: `sudo docker logs -f <container_ID>`
+
+10. You may need to disable the firewall if the web interface is not showing.
+Check the firewall status with `sudo systemctl status firewalld`, if it is on
+then you can turn it off with sudo `systemctl stop firewalld`.
+
+##### Updating the docker container
+
+1. First stop the running instance, find the id with `sudo docker ps`, then
+`sudo docker stop <instance_ID>` or use the container name `sudo docker stop orqa-container`
+
+2. Remove the container using `sudo docker rm orqa-container` (this is so we can reuse the container name which is necessary for the GitHub Action)
+
+2. Pull the latest changes from github `git pull` 
+
+3. Rebuild the docker container and re-run it, following instructions from number 7 onwards above.
 
 ## Email setup with Sendgrid
 
@@ -277,3 +357,120 @@ This in theory should mount your App Container to your Storage Account, therefor
      ```   
      Find the properties in the `.env` file for terrafrom to deploy.   
      You also need the `.tfstate` (terraform state) file for the project. (This is not stored on version control)
+
+## Making strapi available behind https when running on a VM
+
+When running on cloud services such as Oracle, Strapi may be deployed on a VM. To make Strapi run on https, you can use Nginx and Certbot docker containers. 
+
+This assumes you have strapi running in a docker container on a VM with docker installed, and witha  public facing IP address. It also assumes you have access to the teams Cloudflare account and have pruchased a domain, e.g. through Google Domains, or are using the team's domain.
+
+1. Add an A record in Cloudflare pointing your chosen url at the public IP of the VM. Turn off proxy status by clicking the orange cloud.
+1. Create a `docker-compose.yml` file describing the nginx, certbot and strapi containers. Cerbot will be used to create the required certificates. For example, this is one for the OrQA project:
+```
+version: "3"
+services:
+  strapi:
+    image: orqa-strapi:latest
+    build:
+      context: ./orqa-strapi
+    container_name: orqa-container
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - HOST:${HOST}
+      - PORT:${PORT}
+    networks:
+      - strapi-network
+    volumes:
+      - ./app:/srv/app
+    ports:
+      - 1337:1337
+  nginx:
+    image: nginx:1.15-alpine
+    ports:
+      - 80:80
+      - 443:443
+    networks:
+      - strapi-network
+    volumes:
+      - ./data/nginx:/etc/nginx/conf.d
+      - ./etc-letsencrypt:/etc/letsencrypt
+      - ./certbot/www/:/var/www/certbot
+  certbot:
+    image: certbot/certbot
+    networks:
+      - strapi-network
+    volumes:
+      - ./etc-letsencrypt:/etc/letsencrypt
+      - ./var-lib-letsencrypt:/var/lib/letsencrypt
+      - ./certbot/www/:/var/www/certbot
+      - ./var-log-letsencrypt:/var/log/letsencrypt
+networks:
+  strapi-network:
+```
+1. You will need to add a section to the `middlewre.js` file in your strapi repo, as described [here](https://stackoverflow.com/questions/74829211/resolve-strapi-io-content-security-policy-error). Add this to `config/middleware.js`:
+```
+{
+    name: 'strapi::security',
+    config: {
+      contentSecurityPolicy: {
+        useDefaults: true,
+        directives: {
+          'connect-src': ["'self'", 'http:', 'https:'],
+          upgradeInsecureRequests: null,
+        },
+      },
+    },
+  },
+```
+1. If you need, create a `.env` file which contains the env variables listed in `docker-compose.yml`. Change the strapi urls to match what you set up in Cloudflare.
+1. Create a nginx config file `data/nginx/app.conf`, replacing the urls with the one you set up in Cloudflare. The certificates section refers to the locations where certbot will save your certificates. If you change this location in the `docker-compose.yml` file, you will need to update them here. For example:
+```
+server {
+    listen 80;
+    server_name orqa-strapi-dev.orqa.uk;
+    server_tokens off;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    server_name orqa-strapi-dev.orqa.uk;
+    server_tokens off;
+
+    ssl_certificate /etc/letsencrypt/live/orqa-strapi-dev.orqa.uk/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/orqa-strapi-dev.orqa.uk/privkey.pem;
+
+    location / {
+        proxy_pass  http://orqa-strapi-dev.orqa.uk:1337;
+        proxy_http_version 1.1;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Server $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Host $http_host;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "Upgrade";
+        proxy_pass_request_headers on;
+    }
+}
+
+```
+1. Ask certbot to create the required certificates `docker compose run certbot certonly -d orqa-strapi-dev.orqa.uk --manual --preferred-challenges dns` (inserting your url). You will be asked to provide your email address. At the point where you are asked to create a TXT file, leave the terminal running and go to Cloudflare and use the name and value provided by certbot to create a new TXT record in cloudflare. You can test this has worked by visiting the Google DNS dig service that certbot recommends (e.g. https://toolbox.googleapps.com/apps/dig/#TXT/_acme-challenge.orqa-strapi-dev.orqa.uk) and checking that the value you provided in the TXT record is shown. Once this has worked, return to the terminal and press Enter. You should then see a message confirming that cerbot has created your certificates. 
+1. You can now bring the rest of the stack up using `docker compose up -d`. Other useful commands are `docker compose restart`, `docker compose logs -f strapi` (replace strapi with nginx to view nginx logs). If you encounter any issues, check what's going on in the logs.
+
+This certificate will not be automatically renewed and expires after 3 months. We need to add here instructions for setting up automatic renewal or how to renew. 
+
+Note, for convenience, you can add your user to the docker users group to avoid using sudo: `sudo usermod -aG docker $USER` `newgrp docker`
+
+### Useful links about strapi and https
+https://hackmd.io/@Vatten/HyA1k1_ut   
+https://www.willianantunes.com/blog/2022/08/create-a-certificate-using-certbot-through-docker
